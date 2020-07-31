@@ -11,10 +11,13 @@
 
 namespace Symfony\Component\EventDispatcher\Tests;
 
+use Amp\Deferred;
+use Amp\Promise;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\EventDispatcher\ImmutableEventDispatcher;
 use Symfony\Contracts\EventDispatcher\Event;
+use function Amp\call;
 
 /**
  * @author Bernhard Schussek <bschussek@gmail.com>
@@ -40,14 +43,22 @@ class ImmutableEventDispatcherTest extends TestCase
     public function testDispatchDelegates()
     {
         $event = new Event();
-        $resultEvent = new Event();
+        $eventName = 'event';
+
+        $return = call(function () use ($event, $eventName) {
+            $defer = new Deferred();
+            $defer->resolve($event);
+            return $defer->promise();
+        });
 
         $this->innerDispatcher->expects($this->once())
             ->method('dispatch')
-            ->with($event, 'event')
-            ->willReturn($resultEvent);
+            ->with($event, $eventName)
+            ->willReturn($return);
 
-        $this->assertSame($resultEvent, $this->dispatcher->dispatch($event, 'event'));
+        Promise\wait(call(function () use ($event, $eventName) {
+            $this->assertSame($event, yield $this->dispatcher->dispatch($event, $eventName));
+        }));
     }
 
     public function testGetListenersDelegates()

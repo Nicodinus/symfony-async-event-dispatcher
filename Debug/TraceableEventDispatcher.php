@@ -19,6 +19,7 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Stopwatch\Stopwatch;
 use Symfony\Contracts\Service\ResetInterface;
+use function Amp\call;
 
 /**
  * Collects some data about event listeners.
@@ -132,37 +133,39 @@ class TraceableEventDispatcher implements EventDispatcherInterface, ResetInterfa
     {
         $eventName = $eventName ?? \get_class($event);
 
-        if (null === $this->callStack) {
-            $this->callStack = new \SplObjectStorage();
-        }
+        return call(static function (self &$self) use ($event, $eventName) {
 
-        $currentRequestHash = $this->currentRequestHash = $this->requestStack && ($request = $this->requestStack->getCurrentRequest()) ? spl_object_hash($request) : '';
+            if (null === $self->callStack) {
+                $self->callStack = new \SplObjectStorage();
+            }
 
-        if (null !== $this->logger && $event instanceof StoppableEventInterface && $event->isPropagationStopped()) {
-            $this->logger->debug(sprintf('The "%s" event is already stopped. No listeners have been called.', $eventName));
-        }
+            $currentRequestHash = $self->currentRequestHash = $self->requestStack && ($request = $self->requestStack->getCurrentRequest()) ? spl_object_hash($request) : '';
 
-        $this->preProcess($eventName);
-        try {
-            $this->beforeDispatch($eventName, $event);
+            if (null !== $self->logger && $event instanceof StoppableEventInterface && $event->isPropagationStopped()) {
+                $self->logger->debug(sprintf('The "%s" event is already stopped. No listeners have been called.', $eventName));
+            }
+
+            $self->preProcess($eventName);
             try {
-                $e = $this->stopwatch->start($eventName, 'section');
+                $self->beforeDispatch($eventName, $event);
                 try {
-                    $this->dispatcher->dispatch($event, $eventName);
-                } finally {
-                    if ($e->isStarted()) {
-                        $e->stop();
+                    $e = $self->stopwatch->start($eventName, 'section');
+                    try {
+                        yield $self->dispatcher->dispatch($event, $eventName);
+                    } finally {
+                        if ($e->isStarted()) {
+                            $e->stop();
+                        }
                     }
+                } finally {
+                    $self->afterDispatch($eventName, $event);
                 }
             } finally {
-                $this->afterDispatch($eventName, $event);
+                $self->currentRequestHash = $currentRequestHash;
+                $self->postProcess($eventName);
             }
-        } finally {
-            $this->currentRequestHash = $currentRequestHash;
-            $this->postProcess($eventName);
-        }
 
-        return $event;
+        }, $this);
     }
 
     /**

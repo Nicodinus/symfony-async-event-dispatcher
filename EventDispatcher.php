@@ -11,8 +11,10 @@
 
 namespace Symfony\Component\EventDispatcher;
 
+use Amp\Promise;
 use Psr\EventDispatcher\StoppableEventInterface;
 use Symfony\Component\EventDispatcher\Debug\WrappedListener;
+use function Amp\call;
 
 /**
  * The EventDispatcherInterface is the central point of Symfony's event listener system.
@@ -28,15 +30,37 @@ use Symfony\Component\EventDispatcher\Debug\WrappedListener;
  * @author Jordi Boggiano <j.boggiano@seld.be>
  * @author Jordan Alliot <jordan.alliot@gmail.com>
  * @author Nicolas Grekas <p@tchwork.com>
+ * @author Aleksei Iarovoi <nicodinus@yandex.ru>
  */
 class EventDispatcher implements EventDispatcherInterface
 {
-    private $listeners = [];
-    private $sorted = [];
+    /**
+     * @var array
+     * @java-like-doc--var \Array<string $classname, <int $priority, callable[] $callable>>
+     */
+    private $listeners;
+
+    /**
+     * @var array
+     * @java-like-doc--var \Array<string, callable[] $callable>
+     */
+    private $sorted;
+
+    /**
+     * @var array
+     * @java-like-doc--var \Array<string, callable[] $callable>
+     */
     private $optimized;
 
+
+    /**
+     * EventDispatcher constructor.
+     */
     public function __construct()
     {
+        $this->listeners = [];
+        $this->sorted = [];
+
         if (__CLASS__ === static::class) {
             $this->optimized = [];
         }
@@ -45,21 +69,23 @@ class EventDispatcher implements EventDispatcherInterface
     /**
      * {@inheritdoc}
      */
-    public function dispatch(object $event, string $eventName = null): object
+    public function dispatch(object $event, ?string $eventName = null): object
     {
-        $eventName = $eventName ?? \get_class($event);
+        return call(static function (self &$self) use ($event, $eventName) {
 
-        if (null !== $this->optimized && null !== $eventName) {
-            $listeners = $this->optimized[$eventName] ?? (empty($this->listeners[$eventName]) ? [] : $this->optimizeListeners($eventName));
-        } else {
-            $listeners = $this->getListeners($eventName);
-        }
+            $eventName = $eventName ?? \get_class($event);
 
-        if ($listeners) {
-            $this->callListeners($listeners, $eventName, $event);
-        }
+            if (null !== $self->optimized && null !== $eventName) {
+                $listeners = $self->optimized[$eventName] ?? (empty($self->listeners[$eventName]) ? [] : $self->optimizeListeners($eventName));
+            } else {
+                $listeners = $self->getListeners($eventName);
+            }
 
-        return $event;
+            yield $self->callListeners($listeners, $eventName, $event);
+
+            return $event;
+
+        }, $this);
     }
 
     /**
@@ -218,21 +244,34 @@ class EventDispatcher implements EventDispatcherInterface
      * @param callable[] $listeners The event listeners
      * @param string     $eventName The name of the event to dispatch
      * @param object     $event     The event object to pass to the event handlers/listeners
+     *
+     * @return Promise<void>
      */
-    protected function callListeners(iterable $listeners, string $eventName, object $event)
+    protected function callListeners(iterable $listeners, string $eventName, object $event): Promise
     {
-        $stoppable = $event instanceof StoppableEventInterface;
+        return call(static function (self &$self) use (&$listeners, &$eventName, &$event) {
 
-        foreach ($listeners as $listener) {
-            if ($stoppable && $event->isPropagationStopped()) {
-                break;
+            $stoppable = $event instanceof StoppableEventInterface;
+
+            foreach ($listeners as $listener) {
+
+                if ($stoppable && $event->isPropagationStopped()) {
+                    break;
+                }
+
+                yield call($listener, $event, $eventName, $self);
+
             }
-            $listener($event, $eventName, $this);
-        }
+
+        }, $this);
     }
 
     /**
      * Sorts the internal list of listeners for the given event by priority.
+     *
+     * @param string $eventName
+     *
+     * @return void
      */
     private function sortListeners(string $eventName)
     {
@@ -252,6 +291,10 @@ class EventDispatcher implements EventDispatcherInterface
 
     /**
      * Optimizes the internal list of listeners for the given event by priority.
+     *
+     * @param string $eventName
+     *
+     * @return array
      */
     private function optimizeListeners(string $eventName): array
     {
